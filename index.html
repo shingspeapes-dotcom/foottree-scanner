@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Foot Tree Roadshow Sales</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root { --green:#2e7d32; --bg:#f4f6f4; }
+  * { box-sizing:border-box; font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif; }
+  body { margin:0; background:var(--bg); padding-bottom:40px; }
+  header { background:var(--green); color:#fff; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; }
+  header h1 { font-size:17px; margin:0; }
+  header .staff { font-size:13px; opacity:.9; }
+  .wrap { padding:12px; max-width:480px; margin:0 auto; }
+  button { border:none; border-radius:10px; cursor:pointer; }
+  .big { width:100%; padding:16px; font-size:18px; font-weight:600; background:var(--green); color:#fff; margin-bottom:10px; }
+  .big:disabled { background:#9e9e9e; }
+  #reader { border-radius:10px; overflow:hidden; margin-bottom:10px; display:none; }
+  .manual { display:flex; gap:8px; margin-bottom:12px; }
+  .manual input { flex:1; padding:12px; font-size:16px; border:1px solid #ccc; border-radius:10px; }
+  .manual button { padding:12px 16px; background:#555; color:#fff; font-size:15px; }
+  .bt { width:100%; padding:12px; font-size:15px; font-weight:600; background:#e0e0e0; color:#333; margin-bottom:12px; }
+  .bt.on { background:#1565c0; color:#fff; }
+  .card { background:#fff; border-radius:12px; padding:14px; box-shadow:0 1px 4px rgba(0,0,0,.12); margin-bottom:12px; }
+  .card .name { font-size:17px; font-weight:700; }
+  .card .meta { color:#555; font-size:14px; margin-top:4px; }
+  .card.notfound { border:2px solid #d32f2f; }
+  .payrow { display:flex; gap:8px; margin-top:12px; }
+  .payrow button { flex:1; padding:14px 4px; font-size:15px; font-weight:600; color:#fff; }
+  .cash { background:#388e3c; } .paynow { background:#7b1fa2; } .ccard { background:#1565c0; }
+  .cancel { width:100%; margin-top:8px; padding:10px; background:#eee; color:#333; font-size:14px; }
+  .toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#323232; color:#fff;
+           padding:12px 20px; border-radius:24px; font-size:15px; opacity:0; transition:opacity .3s; pointer-events:none; z-index:9; }
+  .toast.show { opacity:1; }
+  h2 { font-size:15px; color:#444; margin:16px 0 8px; }
+  .sale { background:#fff; border-radius:10px; padding:10px 12px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .sale .t { font-size:14px; }
+  .sale .t small { color:#777; display:block; }
+  .sale button { background:#ffebee; color:#c62828; padding:8px 12px; font-size:13px; }
+  .sale.voided { opacity:.45; text-decoration:line-through; }
+  .stats { text-align:center; color:#555; font-size:14px; margin-bottom:10px; }
+  .offline { background:#fff3e0; color:#e65100; padding:8px 12px; border-radius:8px; font-size:13px; margin-bottom:10px; display:none; }
+  /* one-time connection setup */
+  #setup { position:fixed; inset:0; background:var(--bg); z-index:20; padding:24px 16px; }
+  #setup .card { max-width:480px; margin:0 auto; }
+  #setup textarea { width:100%; height:90px; font-size:14px; border:1px solid #ccc; border-radius:8px; padding:10px; }
+  #setup .err { color:#c62828; font-size:14px; margin-top:8px; min-height:18px; }
+</style>
+</head>
+<body>
+<div id="setup">
+  <div class="card">
+    <div class="name">Connect to the sales sheet</div>
+    <div class="meta" style="margin:10px 0">One-time step on this phone: paste the Web app link
+      (from Apps Script &gt; Deploy, it ends in <b>/exec</b>).</div>
+    <textarea id="apiInput" placeholder="https://script.google.com/macros/s/…/exec"></textarea>
+    <div class="err" id="setupErr"></div>
+    <button class="big" onclick="saveApi()">Connect</button>
+  </div>
+</div>
+
+<header>
+  <h1>Foot Tree Roadshow</h1>
+  <div class="staff" id="staffLabel" onclick="setStaff()">Staff: —</div>
+</header>
+<div class="wrap">
+  <div class="offline" id="offlineMsg">No connection — reconnect before saving sales.</div>
+  <div class="stats" id="stats">Loading product list…</div>
+  <button class="big" id="scanBtn" onclick="toggleScan()" disabled>📷 Scan shoebox</button>
+  <div id="reader"></div>
+  <div id="filereader" style="display:none"></div>
+  <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none">
+  <div class="manual">
+    <input id="manualCode" placeholder="Or type barcode / SKU" autocomplete="off">
+    <button onclick="manualLookup()">Find</button>
+  </div>
+  <button class="bt" id="btBtn" onclick="toggleBT()">⌨️ Bluetooth scanner mode: OFF</button>
+  <div id="result"></div>
+  <h2>Sales on this phone today</h2>
+  <div id="recent"><div style="color:#888;font-size:14px">None yet.</div></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+var products = {};      // normalized barcode -> {sku,name,size,price}
+var scanner = null, scanning = false, photoMode = false;
+var SCAN_FORMATS = null;
+var current = null;     // product awaiting payment
+var recent = [];        // sales made on this phone
+var API = localStorage.getItem('ft_api') || '';
+
+function norm(s){ return String(s).replace(/\s+/g,'').toUpperCase(); }
+function $(id){ return document.getElementById(id); }
+function toast(msg){ var t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(function(){t.classList.remove('show');},2200); }
+
+// ---- backend calls (Apps Script web app) ----
+function apiGetProducts(){
+  return fetch(API + '?action=products').then(function(r){ return r.json(); });
+}
+function apiPost(payload){
+  return fetch(API, { method:'POST', body: JSON.stringify(payload) }).then(function(r){ return r.json(); });
+}
+
+// ---- one-time connection setup ----
+function saveApi(){
+  var v = $('apiInput').value.trim();
+  if(!/^https:\/\/script\.google\.com\/.+\/exec$/.test(v)){
+    $('setupErr').textContent = 'That does not look like a Web app link ending in /exec.'; return;
+  }
+  $('setupErr').textContent = 'Checking connection…';
+  API = v;
+  apiGetProducts().then(function(res){
+    if(res.ok && res.products){
+      localStorage.setItem('ft_api', v);
+      $('setup').style.display = 'none';
+      loadProducts(res);
+    } else { throw new Error(res.error || 'unexpected reply'); }
+  }).catch(function(e){
+    $('setupErr').textContent = 'Could not connect: ' + e.message + ' — check the link and that access is set to "Anyone".';
+  });
+}
+
+// ---- staff name (remembered per phone) ----
+function setStaff(){
+  var n = prompt('Your name (shown on each sale):', localStorage.getItem('ft_staff')||'');
+  if(n){ localStorage.setItem('ft_staff', n.trim()); }
+  $('staffLabel').textContent = 'Staff: ' + (localStorage.getItem('ft_staff')||'—');
+}
+if(!localStorage.getItem('ft_staff')) setStaff(); else $('staffLabel').textContent='Staff: '+localStorage.getItem('ft_staff');
+
+// ---- load product list ----
+function loadProducts(res){
+  res.products.forEach(function(r){ products[norm(r[0])] = {sku:r[1], name:r[2], size:r[3], price:r[4]}; });
+  $('stats').textContent = Object.keys(products).length + ' products loaded. Ready.';
+  $('scanBtn').disabled = false;
+}
+if(API){
+  $('setup').style.display = 'none';
+  apiGetProducts().then(loadProducts).catch(function(e){
+    $('stats').textContent = 'Error loading products: ' + e.message;
+    $('setup').style.display = 'block'; // let them re-enter the link
+    $('apiInput').value = API;
+  });
+}
+
+// ---- scanning ----
+function getFormats(){
+  if(!SCAN_FORMATS) SCAN_FORMATS = [Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39,
+    Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.QR_CODE];
+  return SCAN_FORMATS;
+}
+function toggleScan(){
+  if(photoMode){ $('photoInput').click(); return; }
+  if(scanning){ stopScan(); return; }
+  $('reader').style.display='block';
+  scanner = new Html5Qrcode('reader');
+  scanner.start(
+    { facingMode:'environment' },
+    { fps:10, qrbox:{width:260,height:140}, formatsToSupport:getFormats() },
+    function(text){ stopScan(); handleCode(text); },
+    function(){}
+  ).then(function(){ scanning=true; $('scanBtn').textContent='✖ Stop camera'; })
+   .catch(function(err){
+     $('reader').style.display='none';
+     photoMode = true;
+     $('scanBtn').textContent = '📷 Snap barcode photo';
+     toast('Live camera blocked — using photo mode instead.');
+     $('photoInput').click();
+   });
+}
+function stopScan(){
+  if(scanner){ scanner.stop().then(function(){ scanner.clear(); }).catch(function(){}); }
+  scanning=false; $('reader').style.display='none'; $('scanBtn').textContent='📷 Scan shoebox';
+}
+$('photoInput').addEventListener('change', function(){
+  var f = this.files && this.files[0];
+  this.value = '';
+  if(!f) return;
+  toast('Reading barcode…');
+  var fr = new Html5Qrcode('filereader', { formatsToSupport:getFormats() });
+  fr.scanFile(f, false)
+    .then(function(text){ fr.clear(); handleCode(text); })
+    .catch(function(){
+      fr.clear();
+      alert('Could not read the barcode from that photo.\n\nTips: fill the frame with the barcode, hold steady, avoid glare. Or type the code in the box below.');
+    });
+});
+function manualLookup(){
+  var v = $('manualCode').value.trim();
+  if(v){ handleCode(v); $('manualCode').value=''; }
+}
+$('manualCode').addEventListener('keydown', function(e){
+  if(e.key==='Enter' || e.key==='Tab'){ e.preventDefault(); manualLookup(); }
+});
+
+// ---- Bluetooth scanner mode ----
+var btMode = false;
+function toggleBT(){
+  btMode = !btMode;
+  var i = $('manualCode');
+  $('btBtn').textContent = '⌨️ Bluetooth scanner mode: ' + (btMode ? 'ON' : 'OFF');
+  $('btBtn').classList.toggle('on', btMode);
+  if(btMode){
+    if(scanning) stopScan();
+    i.setAttribute('inputmode','none');
+    i.placeholder = 'Scanner ready — just scan';
+    i.focus();
+  } else {
+    i.removeAttribute('inputmode');
+    i.placeholder = 'Or type barcode / SKU';
+  }
+}
+function refocusScanner(){ if(btMode) setTimeout(function(){ $('manualCode').focus(); }, 150); }
+
+// ---- lookup & payment ----
+function handleCode(raw){
+  var key = norm(raw);
+  var p = products[key];
+  if(navigator.vibrate) navigator.vibrate(80);
+  if(p){
+    current = { barcode:key, sku:p.sku, name:p.name, size:p.size, price:p.price };
+    $('result').innerHTML =
+      '<div class="card"><div class="name">'+esc(p.name)+'</div>'+
+      '<div class="meta">Size EU '+esc(p.size||'?')+' &nbsp;·&nbsp; '+esc(p.sku)+(p.price!==''?' &nbsp;·&nbsp; $'+esc(p.price):'')+'</div>'+
+      '<div class="payrow">'+
+        '<button class="cash" onclick="save(\'Cash\')">Cash</button>'+
+        '<button class="paynow" onclick="save(\'PayNow\')">PayNow</button>'+
+        '<button class="ccard" onclick="save(\'Credit Card\')">Credit Card</button>'+
+      '</div><button class="cancel" onclick="clearResult()">Cancel</button></div>';
+  } else {
+    current = { barcode:key, sku:raw, name:'UNMATCHED — check masterlist', size:'', price:'' };
+    $('result').innerHTML =
+      '<div class="card notfound"><div class="name">Not found: '+esc(raw)+'</div>'+
+      '<div class="meta">Not in product list. You can still record it and fix details later.</div>'+
+      '<div class="payrow">'+
+        '<button class="cash" onclick="save(\'Cash\')">Cash</button>'+
+        '<button class="paynow" onclick="save(\'PayNow\')">PayNow</button>'+
+        '<button class="ccard" onclick="save(\'Credit Card\')">Credit Card</button>'+
+      '</div><button class="cancel" onclick="clearResult()">Cancel</button></div>';
+  }
+  $('result').scrollIntoView({behavior:'smooth'});
+  refocusScanner();
+}
+function clearResult(){ current=null; $('result').innerHTML=''; refocusScanner(); }
+
+function save(payment){
+  if(!current) return;
+  var sale = current; clearResult();
+  sale.payment = payment;
+  sale.staff = localStorage.getItem('ft_staff')||'';
+  sale.id = Date.now() + '-' + Math.floor(Math.random()*10000);
+  var entry = { sale:sale, time:new Date(), status:'saving' };
+  recent.unshift(entry); renderRecent();
+  apiPost({ action:'record', sale:sale }).then(function(res){
+    if(!res.ok) throw new Error(res.error || 'save rejected');
+    entry.status='ok'; renderRecent(); toast('Saved: '+sale.name+' ('+payment+')');
+  }).catch(function(e){
+    entry.status='failed'; renderRecent();
+    alert('Save FAILED — record this sale manually or retry.\n'+e.message);
+  });
+}
+
+function undo(id){
+  if(!confirm('Void this sale?')) return;
+  apiPost({ action:'void', id:id }).then(function(res){
+    if(res.ok){ recent.forEach(function(r){ if(r.sale.id===id) r.status='void'; }); renderRecent(); toast('Sale voided.'); }
+    else alert('Could not find sale — void it in the Sales sheet.');
+  }).catch(function(e){ alert('Void failed: '+e.message); });
+}
+
+function renderRecent(){
+  if(!recent.length){ $('recent').innerHTML='<div style="color:#888;font-size:14px">None yet.</div>'; return; }
+  var n = recent.filter(function(r){return r.status!=='void';}).length;
+  $('recent').innerHTML = recent.map(function(r){
+    var s=r.sale;
+    var flag = r.status==='saving'?' ⏳':(r.status==='failed'?' ⚠️ NOT SAVED':'');
+    return '<div class="sale'+(r.status==='void'?' voided':'')+'">'+
+      '<div class="t">'+esc(s.name)+flag+'<small>EU '+esc(s.size||'?')+' · '+esc(s.payment)+' · '+r.time.toLocaleTimeString()+'</small></div>'+
+      (r.status==='ok'?'<button onclick="undo(\''+s.id+'\')">Void</button>':'')+
+      '</div>';
+  }).join('');
+  $('stats').textContent = Object.keys(products).length + ' products loaded · ' + n + ' sale' + (n===1?'':'s') + ' on this phone';
+}
+
+function esc(s){ return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+window.addEventListener('online',  function(){ $('offlineMsg').style.display='none'; });
+window.addEventListener('offline', function(){ $('offlineMsg').style.display='block'; });
+</script>
+</body>
+</html>
