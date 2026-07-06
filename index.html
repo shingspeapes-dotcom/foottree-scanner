@@ -157,7 +157,7 @@ function toggleScan(){
   scanner = new Html5Qrcode('reader');
   scanner.start(
     { facingMode:'environment' },
-    { fps:10, qrbox:{width:260,height:140}, formatsToSupport:getFormats() },
+    { fps:10, formatsToSupport:getFormats() },
     function(text){ stopScan(); handleCode(text); },
     function(){}
   ).then(function(){ scanning=true; $('scanBtn').textContent='✖ Stop camera'; })
