@@ -22,6 +22,8 @@
   .manual button { padding:12px 16px; background:#555; color:#fff; font-size:15px; }
   .bt { width:100%; padding:12px; font-size:15px; font-weight:600; background:#e0e0e0; color:#333; margin-bottom:12px; }
   .bt.on { background:#1565c0; color:#fff; }
+  .bt.ex { background:#fff3e0; color:#e65100; }
+  .mini { padding:8px 14px; background:#e0e0e0; color:#333; font-size:13px; font-weight:600; }
   .card { background:#fff; border-radius:12px; padding:14px; box-shadow:0 1px 4px rgba(0,0,0,.12); margin-bottom:12px; }
   .card .name { font-size:17px; font-weight:700; }
   .card .meta { color:#555; font-size:14px; margin-top:4px; }
@@ -61,7 +63,7 @@
 </div>
 
 <header>
-  <h1>Foot Tree Roadshow</h1>
+  <h1 id="hdr">Foot Tree Roadshow</h1>
   <div class="staff" id="staffLabel" onclick="setStaff()">Staff: —</div>
 </header>
 <div class="wrap">
@@ -76,9 +78,13 @@
     <button onclick="manualLookup()">Find</button>
   </div>
   <button class="bt" id="btBtn" onclick="toggleBT()">⌨️ Bluetooth scanner mode: OFF</button>
+  <button class="bt" id="exBtn" onclick="toggleExchange()">🔄 Exchange a pair</button>
   <div id="result"></div>
   <h2>Sales on this phone today</h2>
   <div id="recent"><div style="color:#888;font-size:14px">None yet.</div></div>
+  <h2 style="display:flex;justify-content:space-between;align-items:center">Latest sales — all phones
+    <button class="mini" onclick="loadRemote()">↻ Refresh</button></h2>
+  <div id="remote"><div style="color:#888;font-size:14px">Tap Refresh to load.</div></div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -134,6 +140,8 @@ function loadProducts(res){
   res.products.forEach(function(r){ products[norm(r[0])] = {sku:r[1], name:r[2], size:r[3], price:r[4]}; });
   $('stats').textContent = Object.keys(products).length + ' products loaded. Ready.';
   $('scanBtn').disabled = false;
+  if(res.event){ $('hdr').textContent = res.event; }
+  else { toast('⚠️ No roadshow name set — type it in the Settings tab of the sheet.'); }
 }
 if(API){
   $('setup').style.display = 'none';
@@ -147,27 +155,42 @@ if(API){
 // ---- scanning ----
 function getFormats(){
   if(!SCAN_FORMATS) SCAN_FORMATS = [Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39,
-    Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.QR_CODE];
+    Html5QrcodeSupportedFormats.CODE_93, Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+    Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.ITF,
+    Html5QrcodeSupportedFormats.CODABAR, Html5QrcodeSupportedFormats.QR_CODE];
   return SCAN_FORMATS;
+}
+function startWith(cameraConfig){
+  return scanner.start(
+    cameraConfig,
+    { fps:10, qrbox:{width:260,height:140}, formatsToSupport:getFormats() },
+    function(text){ stopScan(); handleCode(text); },
+    function(){}
+  );
 }
 function toggleScan(){
   if(photoMode){ $('photoInput').click(); return; }
   if(scanning){ stopScan(); return; }
   $('reader').style.display='block';
   scanner = new Html5Qrcode('reader');
-  scanner.start(
-    { facingMode:'environment' },
-    { fps:10, formatsToSupport:getFormats() },
-    function(text){ stopScan(); handleCode(text); },
-    function(){}
-  ).then(function(){ scanning=true; $('scanBtn').textContent='✖ Stop camera'; })
-   .catch(function(err){
-     $('reader').style.display='none';
-     photoMode = true;
-     $('scanBtn').textContent = '📷 Snap barcode photo';
-     toast('Live camera blocked — using photo mode instead.');
-     $('photoInput').click();
-   });
+  startWith({ facingMode:'environment' })
+  .catch(function(err1){
+    // iOS/Safari sometimes rejects facingMode — retry with an explicit camera id
+    return Html5Qrcode.getCameras().then(function(cams){
+      if(!cams || !cams.length) throw err1;
+      var back = cams.filter(function(c){ return /back|rear|environment/i.test(c.label); });
+      var cam = back.length ? back[back.length-1] : cams[cams.length-1];
+      return startWith(cam.id);
+    });
+  })
+  .then(function(){ scanning=true; $('scanBtn').textContent='✖ Stop camera'; })
+  .catch(function(err){
+    $('reader').style.display='none';
+    photoMode = true;
+    $('scanBtn').textContent = '📷 Snap barcode photo';
+    toast('Live camera unavailable (' + ((err && err.name) || err) + ') — using photo mode.');
+    $('photoInput').click();
+  });
 }
 function stopScan(){
   if(scanner){ scanner.stop().then(function(){ scanner.clear(); }).catch(function(){}); }
@@ -213,50 +236,114 @@ function toggleBT(){
 }
 function refocusScanner(){ if(btMode) setTimeout(function(){ $('manualCode').focus(); }, 150); }
 
+// ---- Exchange flow (money-neutral: return one pair, hand out another) ----
+var exchangeStep = null; // null | 'return' | 'new'
+function toggleExchange(){
+  if(exchangeStep){ endExchange(); toast('Exchange cancelled.'); return; }
+  exchangeStep = 'return';
+  updateExBtn();
+  clearResult();
+  toast('Scan the shoe being RETURNED');
+}
+function endExchange(){ exchangeStep = null; updateExBtn(); }
+function updateExBtn(){
+  var b = $('exBtn');
+  if(exchangeStep === 'return'){ b.textContent = '🔄 Exchange step 1 of 2: scan RETURNED shoe (tap to cancel)'; b.classList.add('ex'); }
+  else if(exchangeStep === 'new'){ b.textContent = '🔄 Exchange step 2 of 2: scan REPLACEMENT shoe (tap to cancel)'; b.classList.add('ex'); }
+  else { b.textContent = '🔄 Exchange a pair'; b.classList.remove('ex'); }
+}
+
+// ---- All-phones recent sales ----
+function loadRemote(){
+  $('remote').innerHTML = '<div style="color:#888;font-size:14px">Loading…</div>';
+  fetch(API + '?action=recent').then(function(r){ return r.json(); }).then(function(res){
+    if(!res.ok) throw new Error(res.error || 'failed');
+    if(!res.sales.length){ $('remote').innerHTML = '<div style="color:#888;font-size:14px">No sales yet.</div>'; return; }
+    $('remote').innerHTML = res.sales.map(function(s){
+      // s = [id, date, time, name, size, payment, staff, status]
+      var voided = s[7] === 'VOID';
+      var pre = s[7] === 'RETURN' ? '↩︎ ' : '';
+      return '<div class="sale'+(voided?' voided':'')+'">'+
+        '<div class="t">'+pre+esc(s[3])+'<small>EU '+esc(s[4]||'?')+' · '+esc(s[5])+' · '+esc(s[2])+' · '+esc(s[6])+'</small></div>'+
+        (!voided ? '<button onclick="voidRemote(\''+esc(s[0])+'\')">Void</button>' : '')+
+        '</div>';
+    }).join('');
+  }).catch(function(e){
+    $('remote').innerHTML = '<div style="color:#c62828;font-size:14px">Could not load: '+esc(e.message)+'</div>';
+  });
+}
+function voidRemote(id){
+  if(!confirm('Void this sale?')) return;
+  apiPost({ action:'void', id:id }).then(function(res){
+    if(res.ok){ toast('Sale voided.'); loadRemote(); }
+    else alert('Could not find that sale — void it in the Sales sheet.');
+  }).catch(function(e){ alert('Void failed: '+e.message); });
+}
+
 // ---- lookup & payment ----
+function actionButtons(){
+  if(exchangeStep === 'return'){
+    return '<div class="payrow"><button class="ccard" onclick="save(\'Exchange\',\'RETURN\')">↩︎ Confirm RETURN</button></div>';
+  }
+  if(exchangeStep === 'new'){
+    return '<div class="payrow"><button class="cash" onclick="save(\'Exchange\')">✔ Confirm REPLACEMENT (even swap)</button></div>';
+  }
+  return '<div class="payrow">'+
+    '<button class="cash" onclick="save(\'Cash\')">Cash</button>'+
+    '<button class="paynow" onclick="save(\'PayNow\')">PayNow</button>'+
+    '<button class="ccard" onclick="save(\'Credit Card\')">Credit Card</button>'+
+    '</div>';
+}
 function handleCode(raw){
   var key = norm(raw);
   var p = products[key];
   if(navigator.vibrate) navigator.vibrate(80);
+  var label = exchangeStep==='return' ? '<div class="meta" style="color:#e65100;font-weight:700">RETURNING THIS PAIR:</div>'
+            : exchangeStep==='new' ? '<div class="meta" style="color:#2e7d32;font-weight:700">REPLACEMENT PAIR:</div>' : '';
   if(p){
     current = { barcode:key, sku:p.sku, name:p.name, size:p.size, price:p.price };
     $('result').innerHTML =
-      '<div class="card"><div class="name">'+esc(p.name)+'</div>'+
+      '<div class="card">'+label+'<div class="name">'+esc(p.name)+'</div>'+
       '<div class="meta">Size EU '+esc(p.size||'?')+' &nbsp;·&nbsp; '+esc(p.sku)+(p.price!==''?' &nbsp;·&nbsp; $'+esc(p.price):'')+'</div>'+
-      '<div class="payrow">'+
-        '<button class="cash" onclick="save(\'Cash\')">Cash</button>'+
-        '<button class="paynow" onclick="save(\'PayNow\')">PayNow</button>'+
-        '<button class="ccard" onclick="save(\'Credit Card\')">Credit Card</button>'+
-      '</div><button class="cancel" onclick="clearResult()">Cancel</button></div>';
+      actionButtons()+
+      '<button class="cancel" onclick="clearResult()">Cancel</button></div>';
   } else {
     current = { barcode:key, sku:raw, name:'UNMATCHED — check masterlist', size:'', price:'' };
     $('result').innerHTML =
-      '<div class="card notfound"><div class="name">Not found: '+esc(raw)+'</div>'+
+      '<div class="card notfound">'+label+'<div class="name">Not found: '+esc(raw)+'</div>'+
       '<div class="meta">Not in product list. You can still record it and fix details later.</div>'+
-      '<div class="payrow">'+
-        '<button class="cash" onclick="save(\'Cash\')">Cash</button>'+
-        '<button class="paynow" onclick="save(\'PayNow\')">PayNow</button>'+
-        '<button class="ccard" onclick="save(\'Credit Card\')">Credit Card</button>'+
-      '</div><button class="cancel" onclick="clearResult()">Cancel</button></div>';
+      actionButtons()+
+      '<button class="cancel" onclick="clearResult()">Cancel</button></div>';
   }
   $('result').scrollIntoView({behavior:'smooth'});
   refocusScanner();
 }
 function clearResult(){ current=null; $('result').innerHTML=''; refocusScanner(); }
 
-function save(payment){
+function save(payment, status){
   if(!current) return;
   var sale = current; clearResult();
   sale.payment = payment;
+  sale.status = status || 'OK';
   sale.staff = localStorage.getItem('ft_staff')||'';
   sale.id = Date.now() + '-' + Math.floor(Math.random()*10000);
   var entry = { sale:sale, time:new Date(), status:'saving' };
   recent.unshift(entry); renderRecent();
   apiPost({ action:'record', sale:sale }).then(function(res){
     if(!res.ok) throw new Error(res.error || 'save rejected');
-    entry.status='ok'; renderRecent(); toast('Saved: '+sale.name+' ('+payment+')');
+    entry.status='ok'; renderRecent();
+    if(sale.status === 'RETURN'){
+      exchangeStep = 'new'; updateExBtn();
+      toast('Return recorded. Now scan the REPLACEMENT shoe.');
+    } else if(sale.payment === 'Exchange'){
+      endExchange();
+      toast('Exchange complete.');
+    } else {
+      toast('Saved: '+sale.name+' ('+payment+')');
+    }
   }).catch(function(e){
     entry.status='failed'; renderRecent();
+    if(sale.status === 'RETURN') endExchange();
     alert('Save FAILED — record this sale manually or retry.\n'+e.message);
   });
 }
@@ -275,8 +362,9 @@ function renderRecent(){
   $('recent').innerHTML = recent.map(function(r){
     var s=r.sale;
     var flag = r.status==='saving'?' ⏳':(r.status==='failed'?' ⚠️ NOT SAVED':'');
+    var pre = s.status==='RETURN' ? '↩︎ ' : '';
     return '<div class="sale'+(r.status==='void'?' voided':'')+'">'+
-      '<div class="t">'+esc(s.name)+flag+'<small>EU '+esc(s.size||'?')+' · '+esc(s.payment)+' · '+r.time.toLocaleTimeString()+'</small></div>'+
+      '<div class="t">'+pre+esc(s.name)+flag+'<small>EU '+esc(s.size||'?')+' · '+esc(s.payment)+' · '+r.time.toLocaleTimeString()+'</small></div>'+
       (r.status==='ok'?'<button onclick="undo(\''+s.id+'\')">Void</button>':'')+
       '</div>';
   }).join('');
